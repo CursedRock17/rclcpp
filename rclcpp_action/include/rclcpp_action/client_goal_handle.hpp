@@ -74,11 +74,14 @@ public:
 
   using Feedback = typename ActionT::Feedback;
   using Result = typename ActionT::Result;
+  using CancelResponse = typename ActionT::Impl::CancelGoalService::Response;
   using FeedbackCallback =
     std::function<void (
         typename ClientGoalHandle<ActionT>::SharedPtr,
         const std::shared_ptr<const Feedback>)>;
   using ResultCallback = std::function<void (const WrappedResult & result)>;
+  using CancelCallback = std::function<void (typename CancelResponse::SharedPtr)>;
+  using CancelRequest = typename ActionT::Impl::CancelGoalService::Request;
 
   virtual ~ClientGoalHandle();
 
@@ -101,6 +104,19 @@ public:
   /// Check if an action client has requested the result for the goal.
   bool
   is_result_aware();
+
+  std::shared_future<typename CancelResponse::SharedPtr>
+  async_cancel(CancelCallback cancel_callback = nullptr)
+  {
+    std::lock_guard<std::mutex> lock(goal_handles_mutex_);
+    if (goal_handles_.count(get_goal_id()) == 0) {
+      throw exceptions::UnknownGoalHandleError();
+    }
+    auto cancel_request = std::make_shared<CancelRequest>();
+    // cancel_request->goal_info.goal_id = goal_handle->get_goal_id();
+    cancel_request->goal_info.goal_id.uuid = get_goal_id();
+    return cancel_implementation(cancel_request, cancel_callback);
+  }
 
 private:
   // The templated Client creates goal handles
@@ -134,6 +150,27 @@ private:
    */
   std::shared_future<WrappedResult>
   async_get_result();
+
+  std::shared_future<typename CancelResponse::SharedPtr>
+  cancel_implementation(
+    typename CancelRequest::SharedPtr cancel_request,
+    CancelCallback cancel_callback = nullptr)
+  {
+    // Put promise in the heap to move it around.
+    auto promise = std::make_shared<std::promise<typename CancelResponse::SharedPtr>>();
+    std::shared_future<typename CancelResponse::SharedPtr> future(promise->get_future());
+    this->send_cancel_request(
+      std::static_pointer_cast<void>(cancel_request),
+      [cancel_callback, promise](std::shared_ptr<void> response) mutable
+      {
+        auto cancel_response = std::static_pointer_cast<CancelResponse>(response);
+        promise->set_value(cancel_response);
+        if (cancel_callback) {
+          cancel_callback(cancel_response);
+        }
+      });
+    return future;
+  }
 
   /// Returns the previous value of awareness
   bool
